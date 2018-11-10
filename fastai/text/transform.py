@@ -1,5 +1,7 @@
 "NLP data processing; tokenizes text and creates vocab indexes"
 from ..torch_core import *
+from functools import reduce
+
 
 __all__ = ['BaseTokenizer', 'SpacyTokenizer', 'Tokenizer', 'Vocab', 'deal_caps', 'fix_html', 'replace_rep', 'replace_wrep', 
            'rm_useless_spaces', 'spec_add_spaces', 'BOS', 'FLD', 'UNK', 'PAD', 'TK_UP', 'TK_REP', 'TK_REP', 'TK_WREP', 
@@ -8,6 +10,56 @@ __all__ = ['BaseTokenizer', 'SpacyTokenizer', 'Tokenizer', 'Vocab', 'deal_caps',
 BOS,FLD,UNK,PAD = 'xxbos','xxfld','xxunk','xxpad'
 TK_UP,TK_REP,TK_WREP = 'xxup','xxrep','xxwrep'
 
+class SentencepieceTokenizer(BaseTokenizer):
+    def __init__(self, path:PathOrStr, cache_name:str='tmp'):
+        self.tok = spm.SentencePieceProcessor()
+        self.tok.Load(str(Path(path) / cache_name / 'm.model'))
+
+    def tokenizer(self, t:str) -> List[str]:
+        return self.tok.EncodeAsPieces(t)
+
+    def add_special_cases(self, toks:Collection[str]):
+        pass
+
+def get_sentencepiece(path:PathOrStr, dataset:TextDataset, rules:ListRules=None,
+                      cache_name:str='tmp', vocab_size:int=30000, 
+                      model_type:str='unigram', input_sentence_size:int=1E7, 
+                      pad_idx:int=1):
+  
+    if not 'sentencepiece' in sys.modules:
+        raise Exception('sentencepiece module is missing: run `pip install sentencepiece`')
+  
+    import sentencepiece as spm  
+    path = Path(path)
+    os.makedirs(path / cache_name, exist_ok=True)
+    rules = rules if rules else default_rules
+    
+    if not os.path.isfile(path / cache_name / 'm.model') or not os.path.isfile(path / 'itos.pkl'):
+        raw_text = reduce(lambda t, rule: rule(t), rules, '\n'.join(dataset.x))
+        raw_text_path = path / cache_name / 'all_text.txt'
+        with open(raw_text_path, 'w') as f:
+            f.write(raw_text)
+      
+        sp_params = f'--input={raw_text_path} --pad_id={pad_idx} --unk_id=0' \
+                    f'--character_coverage=1.0 --bos_id=-1 --eos_id=-1 ' \
+                    f'--input_sentence_size={int(input_sentence_size)} ' \
+                    f'--model_prefix={path / cache_name / "m"} ' \
+                    f'--vocab_size={vocab_size} --model_type={model_type} '
+
+        spm.SentencePieceTrainer.Train(sp_params)
+  
+        with open(path / cache_name / 'm.vocab', 'r') as f:
+            vocab = [line.split('\t')[0] for line in f.readlines()]
+            vocab[0] = UNK
+            vocab[pad_idx] = PAD
+  
+        pickle.dump(vocab, open(path / 'itos.pkl', 'wb'))
+    
+    vocab = Vocab(pickle.load(open(path / 'itos.pkl', 'rb')))
+    spt = SentencepieceTokenizer(path, cache_name)
+    tokenizer = Tokenizer(tok_func=lambda lang: spt, rules=rules)
+    
+    return {'tokenizer': tokenizer, 'vocab': vocab}
 
 class BaseTokenizer():
     "Basic class for a tokenizer function."
